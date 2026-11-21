@@ -64,8 +64,8 @@ app.get('/pair', async (req, res) => {
     });
 
     // Subiri sekunde 3 kisha omba Pairing Code
-    await delay(3000);
-    const code = await sock.requestPairingCode(number);
+    await delay(1000);
+const code = await sock.requestPairingCode(number);
 
     // Rudisha code tu kwenye tovuti
     return res.json({ code });
