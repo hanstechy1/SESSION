@@ -28,8 +28,10 @@ app.get('/pair', async (req, res) => {
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: 'silent' }),
-      browser: Browsers.macOS('Safari'),
-    });
+      browser: Browsers.macOS('Desktop'),
+      syncFullHistory: false, // 
+      generateHighQualityLinkPreview: false,
+});
 
     sock.ev.on('creds.update', saveCreds);
 
