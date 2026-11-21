@@ -7,15 +7,18 @@ const {
   useMultiFileAuthState,
   delay,
   Browsers,
+  DisconnectReason,
 } = require('@whiskeysockets/baileys');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Ukurasa wa mwanzo kuangalia kama server ipo hewani
 app.get('/', (req, res) => {
   res.json({ status: 'active', message: 'Pairing server is running' });
 });
+
+// Tunatunza socket inayofanya kazi ili isikatike
+const activeSockets = new Map();
 
 app.get('/pair', async (req, res) => {
   let number = req.query.number;
@@ -23,74 +26,91 @@ app.get('/pair', async (req, res) => {
     return res.status(400).json({ error: 'Namba ya simu inahitajika' });
   }
 
-  // Ondoa alama zote zisizo namba (mfano +, nafasi, mabano)
   number = number.replace(/\D/g, '');
+  const sessionDir = path.join(__dirname, 'temp', number);
 
-  const sessionDir = path.join(__dirname, 'temp', `${number}`);
+  // Kama kulikuwa na socket ya zamani kwa namba hii, ifunge kwanza
+  if (activeSockets.has(number)) {
+    try {
+      activeSockets.get(number).ws.close();
+    } catch (e) {}
+    activeSockets.delete(number);
+  }
 
   try {
-    // 1. Futa data za zamani za namba hii ili kuzuia migongano ya code
     await fs.remove(sessionDir).catch(() => {});
-
-    // 2. Anzisha auth state mpya
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
 
     const sock = makeWASocket({
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: 'fatal' }),
-      browser: Browsers.ubuntu('Chrome'), // Browser inayokubaliwa zaidi na WhatsApp sasa
-      syncFullHistory: false, // Hii inafanya iwe ya haraka sana bila kupakia meseji za nyuma
-      markOnlineOnConnect: true,
+      browser: Browsers.windows('Chrome'), // Windows Chrome inakubaliwa sana na WhatsApp
+      syncFullHistory: false,
+      generateHighQualityLinkPreview: false,
+      connectTimeoutMs: 60000,
+      defaultQueryTimeoutMs: 0,
+      keepAliveIntervalMs: 10000,
     });
 
+    activeSockets.set(number, sock);
     sock.ev.on('creds.update', saveCreds);
 
-    // 3. WhatsApp inapothibitisha kuunganishwa
-    sock.ev.on('connection.update', async (update) => {
-      const { connection } = update;
+    let codeSentToClient = false;
 
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect } = update;
+
+      // WhatsApp inapofunguka na kuthibitisha simu
       if (connection === 'open') {
         try {
-          await delay(2000);
-
+          await delay(3000);
           const credsPath = path.join(sessionDir, 'creds.json');
           if (fs.existsSync(credsPath)) {
             const credsData = fs.readFileSync(credsPath);
             const sessionId = Buffer.from(credsData).toString('base64');
 
-            // Tuma Session ID moja kwa moja kwenye WhatsApp DM ya mtumiaji
             const userJid = `${number}@s.whatsapp.net`;
             await sock.sendMessage(userJid, {
-              text: `*HONGERA! UMEUNGANISHWA.* 🎉\n\nHii hapa Session ID yako:\n\n\`\`\`${sessionId}\`\`\`\n\n_Hifadhi session hii vizuri na usimpe mtu yeyote!_`,
+              text: `*HONGERA! UMEUNGANISHWA.* 🎉\n\nSession ID yako ni:\n\n\`\`\`${sessionId}\`\`\`\n\n_Hifadhi session hii salama!_`,
             });
           }
 
-          // Subiri sekunde 2 kisha funga socket na ufute mafaili ya muda
           await delay(2000);
+          activeSockets.delete(number);
           await sock.ws.close();
           await fs.remove(sessionDir).catch(() => {});
-        } catch (e) {
-          console.error('Hitilafu wakati wa kutuma Session ID:', e);
+        } catch (err) {
+          console.error('Hitilafu kutuma session:', err);
+        }
+      }
+
+      // Kama muunganisho umekatika wakati bado inasubiri
+      if (connection === 'close') {
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        console.log(`Connection closed na status: ${statusCode}`);
+        if (statusCode !== DisconnectReason.loggedOut) {
+          // Si logout ya kawaida, muunganisho ulikatwa na mtandao
         }
       }
     });
 
-    // 4. Subiri sekunde 5 ili socket iwe tayari kabla ya kuomba code
-    await delay(5000);
+    // Subiri sekunde 6 ili socket iwe na uhusiano imara na WhatsApp
+    await delay(6000);
 
     const code = await sock.requestPairingCode(number);
+    codeSentToClient = true;
 
-    // Format code kuwa na kistari katikati (mfano ABCD-1234) kama haina
-    const cleanCode = code?.includes('-')
+    const formattedCode = code?.includes('-')
       ? code
       : `${code.slice(0, 4)}-${code.slice(4)}`;
 
-    return res.json({ code: cleanCode });
+    return res.json({ code: formattedCode });
   } catch (err) {
-    console.error('Hitilafu ya kutengeneza code:', err);
+    console.error('Hitilafu:', err);
+    activeSockets.delete(number);
     await fs.remove(sessionDir).catch(() => {});
-    return res.status(500).json({ error: 'Imeshindwa kupata pair code. Jaribu tena.' });
+    return res.status(500).json({ error: 'Imeshindwa kutengeneza pair code' });
   }
 });
 
