@@ -1,168 +1,97 @@
 const express = require('express');
 const fs = require('fs-extra');
-const path = require('path');
 const pino = require('pino');
 const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  delay,
-  Browsers,
-  DisconnectReason,
+  default: makeWASocket, useMultiFileAuthState, Browsers, DisconnectReason,
+  delay, fetchLatestBaileysVersion, makeCacheableSignalKeyStore,
 } = require('@whiskeysockets/baileys');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const logger = pino({ level: 'silent' });
+const done = new Set();
 
-app.get('/', (req, res) => {
-  res.json({ status: 'active', message: 'Pairing server is running' });
-});
+async function startSocket(id, opts = {}, attempt = 0) {
+  const dir = `./temp/${id}`;
+  const { state, saveCreds } = await useMultiFileAuthState(dir);
+  const { version } = await fetchLatestBaileysVersion();
 
-// Tunatunza socket inayofanya kazi ili isikatike
-const activeSockets = new Map();
+  const sock = makeWASocket({
+    version,
+    auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
+    logger,
+    printQRInTerminal: false,
+    browser: Browsers.macOS('Chrome'),
+    syncFullHistory: false,
+    markOnlineOnConnect: false,
+    generateHighQualityLinkPreview: false,
+  });
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+    if (qr && opts.onQr) { opts.onQr(qr); opts.onQr = null; }
+
+    if (connection === 'open' && !done.has(id)) {
+      done.add(id);
+      try {
+        await delay(5000);
+        const creds = await fs.readFile(`${dir}/creds.json`);
+        const sessionId = Buffer.from(creds).toString('base64');
+        const jid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+        await sock.sendMessage(jid, { text: sessionId });
+        await sock.sendMessage(jid, { text: '*CONNECTED* ✅\nKeep this Session ID private.' });
+      } catch (e) { console.error('Sending session failed'); }
+      await delay(3000);
+      try { sock.end(); } catch {}
+      await fs.remove(dir);
+      return;
+    }
+
+    if (connection === 'close' && !done.has(id)) {
+      const status = lastDisconnect?.error?.output?.statusCode;
+      const registered = sock.authState.creds.registered;
+      if (status === DisconnectReason.restartRequired || (registered && status !== DisconnectReason.loggedOut && attempt < 3)) {
+        startSocket(id, {}, attempt + 1); // reconnect after pairing — the key fix
+      } else {
+        await fs.remove(dir);
+      }
+    }
+  });
+
+  if (opts.number && !state.creds.registered) {
+    await delay(3000);
+    try {
+      const code = await sock.requestPairingCode(opts.number);
+      opts.onCode(code);
+    } catch (e) { opts.onCode(null); }
+  }
+}
+
+app.get('/', (req, res) => res.json({ status: 'active', message: 'Pairing server is running' }));
 
 app.get('/pair', async (req, res) => {
-  let number = req.query.number;
-  if (!number) {
-    return res.status(400).json({ error: 'Namba ya simu inahitajika' });
-  }
-
-  number = number.replace(/\D/g, '');
-  const sessionDir = path.join(__dirname, 'temp', number);
-
-  // Kama kulikuwa na socket ya zamani kwa namba hii, ifunge kwanza
-  if (activeSockets.has(number)) {
-    try {
-      activeSockets.get(number).ws.close();
-    } catch (e) {}
-    activeSockets.delete(number);
-  }
-
-  try {
-    await fs.remove(sessionDir).catch(() => {});
-    const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-
-    const sock = makeWASocket({
-      auth: state,
-      printQRInTerminal: false,
-      logger: pino({ level: 'fatal' }),
-      browser: Browsers.windows('Chrome'), // Windows Chrome inakubaliwa sana na WhatsApp
-      syncFullHistory: false,
-      generateHighQualityLinkPreview: false,
-      connectTimeoutMs: 60000,
-      defaultQueryTimeoutMs: 0,
-      keepAliveIntervalMs: 10000,
-    });
-
-    activeSockets.set(number, sock);
-    sock.ev.on('creds.update', saveCreds);
-
-    let codeSentToClient = false;
-
-    sock.ev.on('connection.update', async (update) => {
-      const { connection, lastDisconnect } = update;
-
-      // WhatsApp inapofunguka na kuthibitisha simu
-      if (connection === 'open') {
-        try {
-          await delay(3000);
-          const credsPath = path.join(sessionDir, 'creds.json');
-          if (fs.existsSync(credsPath)) {
-            const credsData = fs.readFileSync(credsPath);
-            const sessionId = Buffer.from(credsData).toString('base64');
-
-            const userJid = `${number}@s.whatsapp.net`;
-            await sock.sendMessage(userJid, {
-              text: `*HONGERA! UMEUNGANISHWA.* 🎉\n\nSession ID yako ni:\n\n\`\`\`${sessionId}\`\`\`\n\n_Hifadhi session hii salama!_`,
-            });
-          }
-
-          await delay(2000);
-          activeSockets.delete(number);
-          await sock.ws.close();
-          await fs.remove(sessionDir).catch(() => {});
-        } catch (err) {
-          console.error('Hitilafu kutuma session:', err);
-        }
-      }
-
-      // Kama muunganisho umekatika wakati bado inasubiri
-      if (connection === 'close') {
-        const statusCode = lastDisconnect?.error?.output?.statusCode;
-        console.log(`Connection closed na status: ${statusCode}`);
-        if (statusCode !== DisconnectReason.loggedOut) {
-          // Si logout ya kawaida, muunganisho ulikatwa na mtandao
-        }
-      }
-    });
-
-    // Subiri sekunde 6 ili socket iwe na uhusiano imara na WhatsApp
-    await delay(6000);
-
-    const code = await sock.requestPairingCode(number);
-    codeSentToClient = true;
-
-    const formattedCode = code?.includes('-')
-      ? code
-      : `${code.slice(0, 4)}-${code.slice(4)}`;
-
-    return res.json({ code: formattedCode });
-  } catch (err) {
-    console.error('Hitilafu:', err);
-    activeSockets.delete(number);
-    await fs.remove(sessionDir).catch(() => {});
-    return res.status(500).json({ error: 'Imeshindwa kutengeneza pair code' });
-  }
+  const number = String(req.query.number || '').replace(/\D/g, '');
+  if (!number) return res.status(400).json({ error: 'Number is required' });
+  const id = `p_${number}_${Date.now()}`;
+  let sent = false;
+  const reply = (code) => {
+    if (sent) return; sent = true;
+    if (!code) return res.status(500).json({ error: 'Could not get code' });
+    res.json({ code: code.match(/.{1,4}/g).join('-') });
+  };
+  setTimeout(() => reply(null), 25000);
+  startSocket(id, { number, onCode: reply }).catch(() => reply(null));
 });
+
 app.get('/qr', async (req, res) => {
-  const sessionDir = path.join(__dirname, 'temp', `qr_${Date.now()}`);
-  let replied = false;
-  try {
-    const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-    const sock = makeWASocket({
-      auth: state,
-      printQRInTerminal: false,
-      logger: pino({ level: 'fatal' }),
-      browser: Browsers.windows('Chrome'),
-      syncFullHistory: false,
-    });
-    sock.ev.on('creds.update', saveCreds);
-
-    sock.ev.on('connection.update', async ({ connection, qr }) => {
-      if (qr && !replied) {
-        replied = true;
-        res.json({ qr });
-      }
-      if (connection === 'open') {
-        try {
-          await delay(3000);
-          const creds = fs.readFileSync(path.join(sessionDir, 'creds.json'));
-          const sessionId = Buffer.from(creds).toString('base64');
-          const me = sock.user.id.split(':')[0] + '@s.whatsapp.net';
-          await sock.sendMessage(me, {
-            text: `*HONGERA! UMEUNGANISHWA.* 🎉\n\nSession ID yako:\n\n\`\`\`${sessionId}\`\`\``,
-          });
-          await delay(2000);
-          await sock.ws.close();
-        } catch (e) {
-          console.error('Hitilafu kutuma session');
-        }
-        await fs.remove(sessionDir).catch(() => {});
-      }
-    });
-
-    setTimeout(async () => {
-      if (!replied) {
-        replied = true;
-        res.status(504).json({ error: 'QR haikupatikana' });
-      }
-    }, 25000);
-  } catch (err) {
-    await fs.remove(sessionDir).catch(() => {});
-    if (!replied) res.status(500).json({ error: 'Imeshindwa kutengeneza QR' });
-  }
+  const id = `q_${Date.now()}`;
+  let sent = false;
+  const reply = (qr) => {
+    if (sent) return; sent = true;
+    qr ? res.json({ qr }) : res.status(500).json({ error: 'Could not get QR' });
+  };
+  setTimeout(() => reply(null), 25000);
+  startSocket(id, { onQr: reply }).catch(() => reply(null));
 });
 
-
-app.listen(PORT, () => {
-  console.log(`Server ipo tayari kwenye port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
