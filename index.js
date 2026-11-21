@@ -36,7 +36,7 @@ async function startSocket(id, opts = {}, attempt = 0) {
       try {
         await delay(5000);
         const creds = await fs.readFile(`${dir}/creds.json`);
-        const sessionId = Buffer.from(creds).toString('base64');
+        const sessionId = 'HANS TECHY~' + Buffer.from(creds).toString('base64');
         const jid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
         await sock.sendMessage(jid, { text: sessionId });
         await sock.sendMessage(jid, { text: '*CONNECTED* ✅\nKeep this Session ID private.' });
