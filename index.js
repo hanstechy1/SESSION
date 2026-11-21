@@ -113,6 +113,55 @@ app.get('/pair', async (req, res) => {
     return res.status(500).json({ error: 'Imeshindwa kutengeneza pair code' });
   }
 });
+app.get('/qr', async (req, res) => {
+  const sessionDir = path.join(__dirname, 'temp', `qr_${Date.now()}`);
+  let replied = false;
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+    const sock = makeWASocket({
+      auth: state,
+      printQRInTerminal: false,
+      logger: pino({ level: 'fatal' }),
+      browser: Browsers.windows('Chrome'),
+      syncFullHistory: false,
+    });
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', async ({ connection, qr }) => {
+      if (qr && !replied) {
+        replied = true;
+        res.json({ qr });
+      }
+      if (connection === 'open') {
+        try {
+          await delay(3000);
+          const creds = fs.readFileSync(path.join(sessionDir, 'creds.json'));
+          const sessionId = Buffer.from(creds).toString('base64');
+          const me = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+          await sock.sendMessage(me, {
+            text: `*HONGERA! UMEUNGANISHWA.* 🎉\n\nSession ID yako:\n\n\`\`\`${sessionId}\`\`\``,
+          });
+          await delay(2000);
+          await sock.ws.close();
+        } catch (e) {
+          console.error('Hitilafu kutuma session');
+        }
+        await fs.remove(sessionDir).catch(() => {});
+      }
+    });
+
+    setTimeout(async () => {
+      if (!replied) {
+        replied = true;
+        res.status(504).json({ error: 'QR haikupatikana' });
+      }
+    }, 25000);
+  } catch (err) {
+    await fs.remove(sessionDir).catch(() => {});
+    if (!replied) res.status(500).json({ error: 'Imeshindwa kutengeneza QR' });
+  }
+});
+
 
 app.listen(PORT, () => {
   console.log(`Server ipo tayari kwenye port ${PORT}`);
