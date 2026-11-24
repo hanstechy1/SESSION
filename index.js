@@ -10,7 +10,7 @@ const {
 } = require('@whiskeysockets/baileys');
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '10mb' }));
 const PORT = process.env.PORT || 3000;
 const logger = pino({ level: 'silent' });
 const done = new Set();
@@ -54,12 +54,20 @@ async function saveShortSession(dir) {
   }
   await walk(dir);
   if (!files['creds.json']) throw new Error('Baileys creds.json is missing.');
-  const id = crypto.randomBytes(5).toString('base64url').toUpperCase();
-  await pool.query(
-    'INSERT INTO hans_sessions (id, auth_state) VALUES ($1, $2::jsonb)',
-    [id, JSON.stringify(files)]
-  );
-  return id;
+  // Generate an opaque, random short code and retry on the extremely unlikely collision.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const id = crypto.randomBytes(5).toString('base64url').toUpperCase();
+    try {
+      await pool.query(
+        'INSERT INTO hans_sessions (id, auth_state) VALUES ($1, $2::jsonb)',
+        [id, JSON.stringify(files)]
+      );
+      return id;
+    } catch (error) {
+      if (error.code !== '23505') throw error;
+    }
+  }
+  throw new Error('Could not allocate a unique short session code.');
 }
 
 app.get('/', (_req, res) => res.json({ status: 'active', message: 'Pairing server is running' }));
@@ -132,6 +140,7 @@ async function startSocket(id, opts = {}, attempt = 0) {
       await delay(3000);
       try { sock.end(); } catch {}
       await fs.remove(dir);
+      done.delete(id);
       return;
     }
 
