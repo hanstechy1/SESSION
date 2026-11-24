@@ -131,7 +131,7 @@ async function startSocket(id, opts = {}, attempt = 0) {
         const shortId = await saveShortSession(dir);
         const jid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
         await sock.sendMessage(jid, { text: 'HANS TECHY~' + shortId });
-        await sock.sendMessage(jid, { text: '*CONNECTED* ✅\\nKeep this Session ID private.' });
+        await sock.sendMessage(jid, { text: '*CONNECTED* ✅\nKeep this Session ID private.' });
       } catch (e) {
         console.error('Saving session failed:', e.message);
         const jid = sock.user?.id?.split(':')[0] + '@s.whatsapp.net';
