@@ -64,6 +64,21 @@ async function saveShortSession(dir) {
 
 app.get('/', (_req, res) => res.json({ status: 'active', message: 'Pairing server is running' }));
 
+app.put('/session/:id', authRequest, async (req, res) => {
+  try {
+    const id = String(req.params.id || '').toUpperCase();
+    const files = req.body?.files;
+    if (!/^[A-Z0-9_-]{6,20}$/.test(id) || !files || typeof files !== 'object' || Array.isArray(files) || typeof files['creds.json'] !== 'string') {
+      return res.status(400).json({ error: 'Invalid session payload' });
+    }
+    await pool.query("UPDATE hans_sessions SET auth_state = $2::jsonb, expires_at = NOW() + INTERVAL '90 days' WHERE id = $1", [id, JSON.stringify(files)]);
+    return res.json({ saved: true });
+  } catch (error) {
+    console.error('Session update failed:', error.message);
+    return res.status(500).json({ error: 'Could not update session' });
+  }
+});
+
 app.get('/session/:id', authRequest, async (req, res) => {
   try {
     const id = String(req.params.id || '').toUpperCase();
