@@ -165,7 +165,7 @@ async function startSocket(id, opts = {}, attempt = 0) {
 }
 
 app.get('/pair', async (req, res) => {
-  const number = String(req.query.number || '').replace(/\\D/g, '');
+  const number = String(req.query.number || '').replace(/\D/g, '');
   if (!number) return res.status(400).json({ error: 'Number is required' });
   if (!pool || !API_SECRET) return res.status(503).json({ error: 'Short-session storage is not configured' });
   const id = `p_${number}_${Date.now()}`;
